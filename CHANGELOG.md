@@ -1,3 +1,6 @@
+## 3.4.6
+ - Fix: codecs provided with `additional_codecs` now correctly run in the pipeline's context, which means that they respect the `pipeline.ecs_compatibility` setting [#152](https://github.com/logstash-plugins/logstash-input-http/pull/152)
+
 ## 3.4.5
  - Build: do not package log4j-api dependency [#149](https://github.com/logstash-plugins/logstash-input-http/pull/149).
    Logstash provides the log4j framework and the dependency is not needed except testing and compiling.
