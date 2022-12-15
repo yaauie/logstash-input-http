@@ -235,49 +235,83 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
 
   def validate_ssl_settings!
     if !@ssl
-      @logger.warn("SSL Certificate will not be used") if @ssl_certificate
-      @logger.warn("SSL Key will not be used") if @ssl_key
-      @logger.warn("SSL Java Key Store will not be used") if @keystore
+      ignored_params = original_params.keys.select { |opk| opk.start_with?('ssl_', 'tls_', 'keystore', 'cipher_suites', 'verify_mode') }
+      @logger.warn("SSL-related config `#{ignored_params.join('`,`')}` will not be used because `ssl` is disabled") unless ignored_params.empty?
       return # code bellow assumes `ssl => true`
     end
 
-    if !(ssl_key_configured? || ssl_jks_configured?)
-      raise LogStash::ConfigurationError, "Certificate or JKS must be configured"
+    # IDENTITY-CENTRIC SETTINGS
+    raise_config_error! "`ssl_certificate` or `keystore` must be configured when `ssl` is enabled" unless @ssl_certificate || @keystore
+    raise_config_error! "`ssl_certificate` and `keystore` cannot both be configured" if @ssl_certificate && @keystore
+
+    raise_config_error! "`ssl_key` is required when `ssl_certificate` is present" if @ssl_certificate && !@ssl_key
+    raise_config_error! "`ssl_key` is not allowed unless `ssl_certificate` is provided" if @ssl_key && !@ssl_certificate
+    raise_config_error! "`ssl_key_passphrase` is not allowed unless `ssl_key` is provided" if @ssl_key_passphrase && !@ssl_key
+
+    raise_config_error! "`keystore_password` is required when `keystore` is present" if @keystore && !@keystore_password
+    raise_config_error! "`keystore_password` is not allowed unless `keystore` is present" if @keystore_password && !@keystore
+
+    # CONFIG-CENTRIC SETTINGS
+    @ssl_cipher_suites_final       = param_with_deprecated('ssl_cipher_suites', 'cipher_suites')
+    @ssl_supported_protocols_final = param_with_deprecated('ssl_supported_protocols', 'tls_min_version', 'tls_max_version') do |tls_min, tls_max|
+      TLS.get_supported(tls_min..tls_max).map(&:name)
     end
 
-    if original_params.key?("verify_mode") && original_params.key?("ssl_verify_mode")
-      raise LogStash::ConfigurationError, "Both `ssl_verify_mode` and (deprecated) `verify_mode` were set. Use only `ssl_verify_mode`."
-    elsif original_params.key?("verify_mode")
-      @ssl_verify_mode_final = @verify_mode
-    else
-      @ssl_verify_mode_final = @ssl_verify_mode
+    # TRUST-CENTRIC SETTINGS
+    @ssl_verify_mode_final = param_with_deprecated('ssl_verify_mode', 'verify_mode')
+
+    if @ssl_verify_mode_final != "none"
+      raise_config_error! "Using `ssl_verify_mode` (or `verify_mode`) set to `peer` or `force_peer` requires the configuration of trust with `ssl_certificate_authorities`" unless @ssl_certificate_authorities.any?
+    elsif @ssl_certificate_authorities&.any?
+      raise_config_error! "The configuration of `ssl_certificate_authorities` requires setting `ssl_verify_mode` to `peer` or `force_peer`"
+    end
+  end
+
+  ##
+  # Unambiguously extracts the value of a param that may be provided with one or more deprecated params
+  #
+  # The `transformer` block is used when one or more deprecated params are explicitly provided,
+  # to transform their effective values into a single suitable value for use as-if it had been
+  # provided by the preferred param.
+  # It is required except in the case of simple param renames.
+  #
+  # @param preferred_param [String]: the preferred param name
+  # @param deprecated_params [String...]: the deprecated param names
+  # @yield values_from_deprecated_params [Object...]: the ordered, validated-and-transformed values of _all_
+  #                                                   deprecated params, including default values.
+  # @yieldreturn [Object]: a single value to use as-if it had been provided by the preferred param
+  #
+  # @raise `LogStash::ConfigurationError` if both preferred and deprecated params are explicitly provided
+  # @return [Object]: the value of the preferred param or an equivalent derived from provided deprecated params
+  #
+  # @note Relies on upstream deprecation warnings, and does not emit its own
+  # @note Does NOT perform validation on extracted value against the preferred_param's validator
+  def param_with_deprecated(preferred_param, *deprecated_params, &transformer)
+    fail ArgumentError, 'deprecated names required'  if deprecated_params.empty?
+    fail ArgumentError, 'block required for multi'   if deprecated_params.size > 1 && !block_given?
+    fail ArgumentError, 'transformer arity mismatch' if transformer && transformer.arity != deprecated_params.size
+    deprecated_params.each do |dp|
+      fail ArgumentError, "param `#{dp}` not marked deprecated" unless self.class.get_config.dig(dp, :deprecated)
     end
 
-    if original_params.key?('cipher_suites') && original_params.key?('ssl_cipher_suites')
-      raise LogStash::ConfigurationError, "Both `ssl_cipher_suites` and (deprecated) `cipher_suites` were set. Use only `ssl_cipher_suites`."
-    elsif original_params.key?('cipher_suites')
-      @ssl_cipher_suites_final = @cipher_suites
-    else
-      @ssl_cipher_suites_final = @ssl_cipher_suites
+    deprecated_params_provided = original_params.keys.select { |k| deprecated_params.include?(k) }
+    return params.fetch(preferred_param, nil) unless deprecated_params_provided.any?
+
+    if original_params.include?(preferred_param)
+      deprecated_desc = "(deprecated) `#{deprecated_params_provided.join('`,`')}`"
+      raise_config_error! "Both `#{preferred_param}` and #{deprecated_desc} were set. Use only `#{preferred_param}`."
     end
 
-    if original_params.key?('tls_min_version') && original_params.key?('ssl_supported_protocols')
-      raise LogStash::ConfigurationError, "Both `ssl_supported_protocols` and (deprecated) `tls_min_ciphers` were set. Use only `ssl_supported_protocols`."
-    elsif original_params.key?('tls_max_version') && original_params.key?('ssl_supported_protocols')
-      raise LogStash::ConfigurationError, "Both `ssl_supported_protocols` and (deprecated) `tls_max_ciphers` were set. Use only `ssl_supported_protocols`."
-    else
-      if original_params.key?('tls_min_version') || original_params.key?('tls_max_version')
-        @ssl_supported_protocols_final = TLS.get_supported(tls_min_version..tls_max_version).map(&:name)
-      else
-        @ssl_supported_protocols_final = @ssl_supported_protocols
-      end
-    end
+    return transformer.call(params.values_at(*deprecated_params)) if transformer
 
-    if require_certificate_authorities? && !client_authentication?
-      raise LogStash::ConfigurationError, "Using `ssl_verify_mode` (or `verify_mode`) set to PEER or FORCE_PEER, requires the configuration of `ssl_certificate_authorities`"
-    elsif !require_certificate_authorities? && client_authentication?
-      raise LogStash::ConfigurationError, "The configuration of `ssl_certificate_authorities` requires setting `ssl_verify_mode` (or `verify_mode`) to PEER or FORCE_PEER"
-    end
+    return params.fetch(deprecated_params.first)
+  end
+
+  ##
+  # @param message [String]
+  # @raise [LogStash::ConfigurationError]
+  def raise_config_error!(message)
+    raise LogStash::ConfigurationError, message
   end
 
   def create_http_server(message_handler)
