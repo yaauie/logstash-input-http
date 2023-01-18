@@ -42,6 +42,9 @@ public class SslHandlerProvider {
         } else if (verifyMode == SslClientVerifyMode.VERIFY_PEER) {
             // If the client supply a client certificate we will verify it.
             engine.setWantClientAuth(true);
+        } else {
+            // Do not request client auth.
+            engine.setWantClientAuth(false);
         }
 
         sslHandler.setHandshakeTimeoutMillis(handshakeTimeoutMilliseconds);

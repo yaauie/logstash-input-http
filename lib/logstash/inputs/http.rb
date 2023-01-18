@@ -1,4 +1,7 @@
 # encoding: utf-8
+
+require "java"
+
 require "logstash/inputs/base"
 require "logstash/namespace"
 require "stud/interval"
@@ -118,8 +121,8 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
   # Deprecated options
 
   # The JKS keystore to validate the client's certificates
-  config :keystore, :validate => :path, :deprecated => "Set 'ssl_certificate' and 'ssl_key' instead."
-  config :keystore_password, :validate => :password, :deprecated => "Set 'ssl_key_passphrase' instead."
+  config :keystore, :validate => :path
+  config :keystore_password, :validate => :password
 
   config :verify_mode, :validate => ['none', 'peer', 'force_peer'], :default => 'none', :deprecated => "Set 'ssl_verify_mode' instead."
   config :cipher_suites, :validate => :array, :default => [], :deprecated => "Set 'ssl_cipher_suites' instead."
@@ -322,40 +325,36 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
   def build_ssl_params
     return nil unless @ssl
 
-    if @keystore && @keystore_password
-      ssl_builder = org.logstash.plugins.inputs.http.util.JksSslBuilder.new(@keystore, @keystore_password.value)
-    else
-      begin
-        ssl_builder = org.logstash.plugins.inputs.http.util.SslSimpleBuilder
-                          .new(@ssl_certificate, @ssl_key, @ssl_key_passphrase.nil? ? nil : @ssl_key_passphrase.value)
-                          .setCipherSuites(normalized_cipher_suites)
-      rescue java.lang.IllegalArgumentException => e
-        @logger.error("SSL configuration invalid", error_details(e))
-        raise LogStash::ConfigurationError, e
-      end
+    ssl_builder = new_ssl_builder
 
-      if client_authentication?
-        ssl_builder.setCertificateAuthorities(@ssl_certificate_authorities)
-      end
+    ssl_builder.setCipherSuites(normalized_cipher_suites)
+
+    if @ssl_certificate_authorities&.any?
+      ssl_builder.setCertificateAuthorities(@ssl_certificate_authorities)
     end
 
     new_ssl_handshake_provider(ssl_builder)
+  rescue java.lang.IllegalArgumentException => e
+    @logger.error("SSL configuration invalid", error_details(e))
+    raise LogStash::ConfigurationError, e
   end
 
-  def ssl_key_configured?
-    !!(@ssl_certificate && @ssl_key)
+  def new_ssl_builder
+    java_import org.logstash.plugins.inputs.http.util.SslSimpleBuilder
+
+    if @keystore
+      SslSimpleBuilder::serverFromKeystore(@keystore, @keystore_password.value)
+    else
+      SslSimpleBuilder::serverFromCertificate(@ssl_certificate, @ssl_key, @ssl_key_passphrase&.value)
+    end
   end
 
-  def ssl_jks_configured?
-    !!(@keystore && @keystore_password)
-  end
-
-  def client_authentication?
-    @ssl_certificate_authorities && @ssl_certificate_authorities.size > 0
+  def certificate_authorities_provided?
+    @ssl_certificate_authorities&.any?
   end
 
   def require_certificate_authorities?
-    @ssl_verify_mode_final == "force_peer" || @ssl_verify_mode_final == "peer"
+    @ssl_verify_mode_final != "none"
   end
 
   private
