@@ -28,6 +28,7 @@ import javax.crypto.Cipher;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
 
 public class SslSimpleBuilder implements SslBuilder {
 
@@ -110,6 +111,11 @@ public class SslSimpleBuilder implements SslBuilder {
 
         ciphers = ciphersSuite;
         return this;
+    }
+
+    public SslSimpleBuilder setTrustStore(String trustStorePath, String trustStorePassword) {
+        LOGGER.debug("SETTING TRUST CONFIGURATOR -> TRUSTSTORE({})", trustStorePath);
+        return setTrustConfigurator(new SslContextBuilderTrustConfigurator.FromTrustStore(trustStorePath, trustStorePassword));
     }
 
     public SslSimpleBuilder setCertificateAuthorities(String[] certs) {
@@ -271,9 +277,10 @@ public class SslSimpleBuilder implements SslBuilder {
      * a {@code SslContextBuilder} with a trust manager, mutating it to override
      * its Trust Manager.
      *
-     * <p>It has one implementation:
+     * <p>Its implementations are:
      *
      * <ul>
+     *     <li>{@link FromTrustStore} - see {@link SslSimpleBuilder#setTrustStore(String, String)}</li>
      *     <li>{@link FromCertificateAuthorities} - see {@link SslSimpleBuilder#setCertificateAuthorities(String[])}</li>
      * </ul>
      */
@@ -281,6 +288,36 @@ public class SslSimpleBuilder implements SslBuilder {
     interface SslContextBuilderTrustConfigurator {
         SslContextBuilder apply(final SslContextBuilder sslContextBuilder) throws Exception;
 
+        /**
+         * This {@code SslContextBuilderTrustConfigurator.FromTrustStore} is capable of configuring
+         * the trust material of an {@code SslContextBuilder} using a keystore-on-disk as a trust store.
+         */
+        class FromTrustStore implements SslContextBuilderTrustConfigurator {
+            private final String trustStorePath;
+            private final char[] trustStorePassword;
+
+            public FromTrustStore(final String trustStorePath, final String trustStorePassword) {
+                this.trustStorePath = trustStorePath;
+                this.trustStorePassword = trustStorePassword.toCharArray();
+            }
+
+            @Override
+            public SslContextBuilder apply(SslContextBuilder sslContextBuilder) throws Exception {
+                LOGGER.debug("Configuring trust with truststore from `{}`", trustStorePath);
+                return sslContextBuilder.trustManager(getTrustManagerFactory());
+            }
+
+            private TrustManagerFactory getTrustManagerFactory() throws CertificateException, KeyStoreException, IOException, NoSuchAlgorithmException {
+                final KeyStore keyStore = KeystoreUtil.load(trustStorePath, trustStorePassword);
+
+                final String algorithm = TrustManagerFactory.getDefaultAlgorithm();
+                final TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(algorithm);
+
+                trustManagerFactory.init(keyStore);
+
+                return trustManagerFactory;
+            }
+        }
 
         /**
          * This {@code SslContextBuilderTrustConfigurator.FromCertificateAuthorities} is capable of configuring

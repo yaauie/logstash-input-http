@@ -261,10 +261,23 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
     end
 
     # TRUST-CENTRIC SETTINGS
+    raise_config_error! "`truststore_password` is required when `truststore` is present" if @truststore && !@truststore_password
+    raise_config_error! "`truststore_password` is not allowed unless `truststore` is present" if @truststore_password && !@truststore
+
     @ssl_verify_mode_final = param_with_deprecated('ssl_verify_mode', 'verify_mode')
 
     if @ssl_verify_mode_final != "none"
-      raise_config_error! "Using `ssl_verify_mode` (or `verify_mode`) set to `peer` or `force_peer` requires the configuration of trust with `ssl_certificate_authorities`" unless @ssl_certificate_authorities.any?
+      raise_config_error! "`ssl_certificate_authorities` and `truststore` cannot both be configured" if @ssl_certificate_authoritie&.any? && @truststore
+
+      # if certificate authorities were NOT provided, but a keystore was, use it as a default trust store.
+      if !@ssl_certificate_authorities&.any? && @keystore && @truststore.nil?
+        @logger.warn("Using provided `keystore` as a default `truststore`")
+        @truststore, @truststore_password = @keystore, @keystore_password
+      end
+
+      raise_config_error! "Using `ssl_verify_mode` (or `verify_mode`) set to `peer` or `force_peer` requires the configuration of trust with `ssl_certificate_authorities` or `truststore`" unless @ssl_certificate_authorities.any? || @truststore
+    elsif @truststore
+      raise_config_error! "The configuration of `truststore` requires setting `ssl_verify_mode` to `peer` or `force_peer`"
     elsif @ssl_certificate_authorities&.any?
       raise_config_error! "The configuration of `ssl_certificate_authorities` requires setting `ssl_verify_mode` to `peer` or `force_peer`"
     end
@@ -331,6 +344,8 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
 
     if @ssl_certificate_authorities&.any?
       ssl_builder.setCertificateAuthorities(@ssl_certificate_authorities)
+    elsif @truststore
+      ssl_builder.setTrustStore(@truststore, @truststore_password.value)
     end
 
     new_ssl_handshake_provider(ssl_builder)
